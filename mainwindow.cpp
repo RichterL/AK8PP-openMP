@@ -18,10 +18,9 @@ MainWindow::~MainWindow()
 
 void MainWindow::onCheckboxClicked(int state)
 {
-    qDebug() << "checkbox clicked";
     if (state == Qt::Checked) {
         ui->threadCount->setReadOnly(false);
-        ui->arraySize->setMaximum(99);
+        ui->arraySize->setMaximum(999);
     } else {
         ui->threadCount->setReadOnly(true);
         ui->threadCount->setValue(32);
@@ -39,91 +38,102 @@ void MainWindow::onButtonClicked()
     int *result;
     if (ui->checkbox->isChecked()) {
         int threadCount = ui->threadCount->value();
-        result = runScalable(arraySize, array, threadCount);
+        result = runScalable(arraySize, threadCount, array);
     } else {
-        result = runNonScalable(arraySize, array);
+        result = runNonScalable(arraySize, array);        
     }
 
     QString text;
-    for (int i = 0; i < arraySize; ++i) {
+    for (int i = 0; i < arraySize; ++i) {        
         text.append(QString::number(result[i])).append(", ");
     }
     ui->textEdit->setText(text);
 }
 
-int* MainWindow::runScalable(int n, int *m, int threadCount)
+int* MainWindow::runScalable(int arraySize, int threadCount, int *input)
 {
-    int q = n / threadCount;
-    int x[threadCount][q];
-    int z[q];
+    if (arraySize < threadCount) {
+        threadCount = arraySize;
+    }
+    // ceil in order to work with uneven arraySize/threadCount (i.e. n=7, p=2)
+    int chunkSize = ceil((float) arraySize / threadCount);
+    int y[threadCount];
+    int *globalPrefixPtr = y;
 
-    // prepare the array
+    #pragma omp parallel num_threads(threadCount)
+    {
+        int threadId = omp_get_thread_num();
+        int localPrefix[chunkSize];
 
-    // divide array into q chunks
-
-    // store chunks in x
-
-    for (int i = 0; i < threadCount; ++i) {
-        // local prefix sum
-        int sum = 0;
-        for (int j = 0; j < q; ++j) {
-            sum += x[i][j];
+        int i;
+        for (i = 0; i <= chunkSize - 1; ++i) {
+            int index = threadId * chunkSize + i;
+            if (index >= arraySize) break; // end of the array may be undefined (uneven arraySize/threadCount)
+            localPrefix[i] = input[index] + (i == 0 ? 0 : localPrefix[i-1]);
         }
-        z[i] = sum;
+        // store last value for global prefix count later
+        globalPrefixPtr[threadId] = localPrefix[i-1];
+
+        #pragma omp barrier
+
+        #pragma omp single
+        {
+            globalPrefixPtr = runNonScalable(threadCount, globalPrefixPtr);
+        }
+
+        // implied barrier
+
+        for (int i = 0; i < chunkSize; ++i) {
+            int index = threadId * chunkSize + i;
+            if (index >= arraySize) break; // end of the array may be undefined (uneven arraySize/threadCount)
+            input[index] = localPrefix[i] + (threadId == 0 ? 0 : globalPrefixPtr[threadId - 1]);
+        }
     }
 
-    int s[threadCount];
-    for (int i = 1; i < threadCount; ++i) {
-        int s[i][q];
-        for (int j = 0; j < q - 1; ++j) {
-            s[i][j] = s[i][j] + z[i - 1];
-        }
-    }
-
-    return m;
+    return input;
 }
 
-int* MainWindow::runNonScalable(int n, int *m)
+int* MainWindow::runNonScalable(int arraySize, int *input)
 {   
     // allow nested parallelism
     omp_set_nested(1);
-    #pragma omp parallel num_threads(n)
+    #pragma omp parallel num_threads(arraySize)
     {
         // every thread creates its own copy of memory
-        int y[n];
-        for (int i = 0; i < n; ++i) {
-            y[i] = m[i];
+        int x[arraySize];
+        for (int i = 0; i < arraySize; ++i) {
+            x[i] = input[i];
         }
 
         // only one thread will execute the outter loop
         #pragma omp single
         {
             // only ceil(log2(n)) iterations are needed
-            for (int j = 0; j < ceil(log2(n)); ++j) {
+            for (int j = 0; j < ceil(log2(arraySize)); ++j) {
                 qDebug() << "SINGLE - CPU " << omp_get_thread_num() << " j = " << j;
 
                 // create a shared variable to lower costs
                 int index = pow(2,j);
 
                 // (n - 2^j) threads will run the nested block in parallel again
-                #pragma omp parallel num_threads(n - index)
+                #pragma omp parallel num_threads(arraySize - index)
                 {
                     // declare loop as cooperative
                     #pragma omp for
-                    for (int i = index; i < n; ++i) {
-                        y[i] = y[i] + m[i - index];
-                        qDebug() << "PARALLEL - CPU " << omp_get_thread_num() << " j = " << j << ", i = " << i << ", y[i] = " << y[i];
+                    for (int i = index; i < arraySize; ++i) {
+                        x[i] = x[i] + input[i - index];
+                        qDebug() << "PARALLEL - CPU " << omp_get_thread_num() << " j = " << j << ", i = " << i << ", x[i] = " << x[i];
                     }
 
                     // declare loop as cooperative
                     #pragma omp for
-                    for (int i = index; i < n; ++i) {
-                        m[i] = y[i];
+                    for (int i = index; i < arraySize; ++i) {
+                        input[i] = x[i];
                     }
                 }
             }
         }
     }
 
-    return m;
+    return input;
 }

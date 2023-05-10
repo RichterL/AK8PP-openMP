@@ -17,8 +17,8 @@ public:
 
 private:
     Ui::MainWindow *ui;
-    int* runScalable(int n, int *array, int threadCount);
-    int* runNonScalable(int n, int *array);
+    int* runScalable(int arraySize, int threadCount, int *input);
+    int* runNonScalable(int arraySize, int *input);
 
 public slots:
     void onCheckboxClicked(int state);
